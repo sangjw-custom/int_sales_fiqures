@@ -1,69 +1,62 @@
-import win32com.client as win32
-import pandas as pd
+import streamlit as st
 import firebase_admin
 from firebase_admin import credentials, firestore
-import os
-import time
+import pandas as pd
+import requests
+import io
 
-# --- [사용자 설정] ---
-KEY_PATH = "int-sales-figures_01.json" 
-# 실제 엑셀 파일 경로 (예: r"C:\Users\User\Documents\손익데이터.xlsb")
-EXCEL_FILE_PATH = r"D:\72. AI TEST\Firebase\sales_fiqures\2603 sales_test.xlsb"
-COLLECTION_NAME = "int-sales-figures"
-# --------------------
+# 1. Firebase 초기화 (Secrets 활용 권장)
+if not firebase_admin._apps:
+    # 팁: 보안을 위해 my_key.json 내용을 Streamlit Secrets에 넣는 것을 추천합니다.
+    cred = credentials.Certificate("int-sales-figures_01.json")
+    firebase_admin.initialize_app(cred)
+db = firestore.client()
 
-def initialize_firebase():
-    if not firebase_admin._apps:
-        cred = credentials.Certificate(KEY_PATH)
-        firebase_admin.initialize_app(cred)
-    return firestore.client()
+st.title("☁️ 클라우드 데이터 전송 시스템")
+st.info("MS OneDrive/SharePoint의 엑셀 주소를 이용해 Firestore로 직접 업로드합니다.")
 
-def upload_data():
-    try:
-        db = initialize_firebase()
-        
-        # 1. 엑셀 앱 제어 (내 PC의 엑셀 권한으로 보안 문서 열기)
-        excel = win32.gencache.EnsureDispatch('Excel.Application')
-        excel.Visible = False
-        
-        print(f"📌 엑셀 파일을 읽는 중입니다... (약간의 시간이 소요될 수 있습니다)")
-        wb = excel.Workbooks.Open(os.path.abspath(EXCEL_FILE_PATH))
-        ws = wb.ActiveSheet
-        
-        # 데이터 영역 전체 로드
-        raw_data = ws.UsedRange.Value
-        
-        # 2. 데이터프레임 변환
-        df = pd.DataFrame(raw_data[1:], columns=raw_data[0])
-        wb.Close(False)
-        excel.Quit()
-        
-        # 3. Firestore 업로드 (13만 건 대용량 처리)
-        df = df.where(pd.notnull(df), None) # 빈값 처리
-        total = len(df)
-        print(f"🚀 총 {total:,}건 업로드 시작 (500개씩 묶어서 전송)")
-        
-        batch = db.batch()
-        start_time = time.time()
+# 2. MS 엑셀 파일 URL 입력
+# 공유 링크 예시: https://company-my.sharepoint.com/:x:/g/personal/.../file.xlsb?download=1
+excel_url = st.text_input(https://kccglass01.sharepoint.com/:x:/s/TORG_A0117D0/IQCytyktOmYCTprk8pZb3Pz6AZ-_H7c6bD2nNC9YfVoV348?e=XG5kwT ?download=1 포함)", placeholder="https://...")
 
-        for index, row in df.iterrows():
-            doc_ref = db.collection(COLLECTION_NAME).document()
-            batch.set(doc_ref, row.to_dict())
-            
-            # 500개마다 전송 (Firestore 제한)
-            if (index + 1) % 500 == 0:
-                batch.commit()
+if st.button("🚀 클라우드 데이터 동기화 시작"):
+    if not excel_url:
+        st.warning("링크를 입력해주세요.")
+    else:
+        try:
+            with st.spinner('클라우드에서 데이터를 가져오는 중...'):
+                # 1. MS 클라우드에서 파일 읽기
+                response = requests.get(excel_url)
+                response.raise_for_status()
+                
+                # 2. 판다스로 변환 (xlsb 엔진 사용)
+                file_content = io.BytesIO(response.content)
+                if excel_url.contains(".xlsb"):
+                    df = pd.read_excel(file_content, engine='pyxlsb')
+                else:
+                    df = pd.read_excel(file_content)
+                
+                df = df.where(pd.notnull(df), None)
+                total_rows = len(df)
+                
+                st.write(f"📊 총 {total_rows:,}건의 데이터를 확인했습니다. 업로드를 시작합니다.")
+
+                # 3. Firestore 배치 업로드 (13만 건 대응)
                 batch = db.batch()
-                elapsed = time.time() - start_time
-                print(f"📦 {index + 1:,} / {total:,} 완료 (진행시간: {elapsed:.1f}초)")
-        
-        batch.commit() # 남은 데이터 전송
-        print(f"✨ 성공! 모든 데이터가 '{COLLECTION_NAME}'에 업로드되었습니다.")
-        
-    except Exception as e:
-        print(f"❌ 에러 발생: {e}")
-        # 오류 시 엑셀 프로세스 강제 종료 방지
-        if 'excel' in locals(): excel.Quit()
-
-if __name__ == "__main__":
-    upload_data()
+                progress_bar = st.progress(0)
+                
+                for index, row in df.iterrows():
+                    doc_ref = db.collection('int-sales-figures').document()
+                    batch.set(doc_ref, row.to_dict())
+                    
+                    if (index + 1) % 500 == 0:
+                        batch.commit()
+                        batch = db.batch()
+                        progress_bar.progress((index + 1) / total_rows)
+                
+                batch.commit() # 남은 데이터
+                st.success(f"✨ 완료! {total_rows:,}건이 성공적으로 저장되었습니다.")
+                
+        except Exception as e:
+            st.error(f"오류 발생: {e}")
+            st.write("힌트: 링크가 직접 다운로드 가능한 형태인지 확인하세요.")
