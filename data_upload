@@ -1,0 +1,47 @@
+import firebase_admin
+from firebase_admin import credentials, firestore
+import pandas as pd
+
+# 1. Firebase 서비스 계정 키 설정
+# Firebase Console > 프로젝트 설정 > 서비스 계정 > '새 비공개 키 생성'으로 받은 파일명
+cred = credentials.Certificate("int-sales-figures_01.json")
+firebase_admin.initialize_app(cred)
+db = firestore.client()
+
+def upload_excel_to_firestore(file_path, collection_name):
+    # 2. 엑셀 파일 읽기 (.xlsb 형식 지원)
+    try:
+        df = pd.read_excel(file_path, engine='pyxlsb')
+        print(f"파일 로드 완료: {len(df)}개의 행을 발견했습니다.")
+    except Exception as e:
+        print(f"파일을 읽는 중 오류 발생: {e}")
+        return
+
+    # 3. 데이터 클리닝 (NaN 값을 파이썬이 인식 가능한 형태로 변경)
+    df = df.where(pd.notnull(df), None)
+
+    # 4. 데이터 업로드
+    collection_ref = db.collection(collection_name)
+    
+    for index, row in df.iterrows():
+        # 행 데이터를 딕셔너리로 변환 (열 이름이 자동으로 키(Key)가 됨)
+        data = row.to_dict()
+        
+        # 특정 열(예: 상품코드)을 문서 ID로 쓰고 싶을 경우
+        # doc_id = str(data.get('상품코드', index)) 
+        # collection_ref.document(doc_id).set(data)
+        
+        # 자동 ID로 업로드할 경우
+        collection_ref.add(data)
+        
+        if index % 10 == 0:
+            print(f"{index}번째 데이터 업로드 중...")
+
+    print(f"성공! '{collection_name}' 컬렉션에 모든 데이터가 업로드되었습니다.")
+
+# 실행 부분
+if __name__ == "__main__":
+    FILE_NAME = "▣ 영업본부 26년 3월 손익 DATA (260403)_상품.xlsb"
+    COLLECTION_NAME = "monthly_profits_202603" # Firebase에 생성될 테이블 이름
+    
+    upload_excel_to_firestore(FILE_NAME, COLLECTION_NAME)
