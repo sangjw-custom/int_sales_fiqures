@@ -1,47 +1,66 @@
 import firebase_admin
 from firebase_admin import credentials, firestore
 import pandas as pd
+import tkinter as tk
+from tkinter import filedialog, messagebox
+import os
 
-# 1. Firebase 서비스 계정 키 설정
-# Firebase Console > 프로젝트 설정 > 서비스 계정 > '새 비공개 키 생성'으로 받은 파일명
-cred = credentials.Certificate("int-sales-figures_01.json")
-firebase_admin.initialize_app(cred)
-db = firestore.client()
+# 1. Firebase 접속 설정
+def initialize_db():
+    if not firebase_admin._apps:
+        # 서비스 계정 키 파일명이 다르면 여기서 수정하세요.
+        cred = credentials.Certificate("int-sales-figures_01.json")
+        firebase_admin.initialize_app(cred)
+    return firestore.client()
 
-def upload_excel_to_firestore(file_path, collection_name):
-    # 2. 엑셀 파일 읽기 (.xlsb 형식 지원)
-    try:
-        df = pd.read_excel(file_path, engine='pyxlsb')
-        print(f"파일 로드 완료: {len(df)}개의 행을 발견했습니다.")
-    except Exception as e:
-        print(f"파일을 읽는 중 오류 발생: {e}")
+# 2. 파일 선택 창 띄우기
+def select_file():
+    root = tk.Tk()
+    root.withdraw() # 메인 윈도우 숨기기
+    
+    # .xlsb, .xlsx 파일만 선택하도록 설정
+    file_path = filedialog.askopenfilename(
+        title="업로드할 엑셀 파일을 선택하세요",
+        filetypes=[("Excel files", "*.xlsb *.xlsx *.xls")]
+    )
+    return file_path
+
+# 3. 업로드 실행 함수
+def start_upload():
+    file_path = select_file()
+    
+    if not file_path:
+        print("파일 선택이 취소되었습니다.")
         return
 
-    # 3. 데이터 클리닝 (NaN 값을 파이썬이 인식 가능한 형태로 변경)
-    df = df.where(pd.notnull(df), None)
-
-    # 4. 데이터 업로드
-    collection_ref = db.collection(collection_name)
-    
-    for index, row in df.iterrows():
-        # 행 데이터를 딕셔너리로 변환 (열 이름이 자동으로 키(Key)가 됨)
-        data = row.to_dict()
+    try:
+        db = initialize_db()
         
-        # 특정 열(예: 상품코드)을 문서 ID로 쓰고 싶을 경우
-        # doc_id = str(data.get('상품코드', index)) 
-        # collection_ref.document(doc_id).set(data)
+        # 컬렉션 이름을 파일명이나 날짜로 자동 생성 (예: Sales_Data)
+        collection_name = "Sales_Profit_Upload" 
         
-        # 자동 ID로 업로드할 경우
-        collection_ref.add(data)
+        print(f"[{os.path.basename(file_path)}] 읽는 중...")
+        df = pd.read_excel(file_path, engine='pyxlsb')
+        df = df.where(pd.notnull(df), None) # 빈값 처리
+
+        batch = db.batch()
+        total_count = len(df)
         
-        if index % 10 == 0:
-            print(f"{index}번째 데이터 업로드 중...")
+        for index, row in df.iterrows():
+            doc_data = row.to_dict()
+            doc_ref = db.collection(collection_name).document()
+            batch.set(doc_ref, doc_data)
+            
+            if (index + 1) % 500 == 0:
+                batch.commit()
+                batch = db.batch()
+                print(f"{index + 1} / {total_count}개 완료...")
 
-    print(f"성공! '{collection_name}' 컬렉션에 모든 데이터가 업로드되었습니다.")
+        batch.commit()
+        messagebox.showinfo("성공", f"{total_count}건의 데이터가 성공적으로 업로드되었습니다!")
+        
+    except Exception as e:
+        messagebox.showerror("오류", f"업로드 중 문제가 발생했습니다:\n{e}")
 
-# 실행 부분
 if __name__ == "__main__":
-    FILE_NAME = "▣ 영업본부 26년 3월 손익 DATA (260403)_상품_t.xlsb"
-    COLLECTION_NAME = "monthly_profits_202603" # Firebase에 생성될 테이블 이름
-    
-    upload_excel_to_firestore(FILE_NAME, COLLECTION_NAME)
+    start_upload()
