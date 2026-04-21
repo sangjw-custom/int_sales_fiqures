@@ -1,66 +1,84 @@
+import win32com.client as win32
+import pandas as pd
 import firebase_admin
 from firebase_admin import credentials, firestore
-import pandas as pd
-import tkinter as tk
-from tkinter import filedialog, messagebox
 import os
+import time
 
-# 1. Firebase 접속 설정
-def initialize_db():
+# --- [설정 영역] ---
+# 1. Firebase 키 파일 경로
+KEY_PATH = "int-sales-figures_01.json" 
+# 2. 업로드할 보안 엑셀 파일의 전체 경로 (r을 붙여주세요)
+EXCEL_FILE_PATH = r"C:\Users\YourName\Documents\▣ 영업본부 26년 3월 손익 DATA (260403)_상품.xlsb"
+# 3. Firestore 컬렉션 이름
+COLLECTION_NAME = "int-sales-figures"
+# ------------------
+
+def initialize_firebase():
     if not firebase_admin._apps:
-        # 서비스 계정 키 파일명이 다르면 여기서 수정하세요.
-        cred = credentials.Certificate("int-sales-figures_01.json")
+        cred = credentials.Certificate(KEY_PATH)
         firebase_admin.initialize_app(cred)
     return firestore.client()
 
-# 2. 파일 선택 창 띄우기
-def select_file():
-    root = tk.Tk()
-    root.withdraw() # 메인 윈도우 숨기기
+def read_secure_excel(file_path):
+    print(f"📌 보안 문서 읽기 시작: {os.path.basename(file_path)}")
+    # 실제 설치된 엑셀 앱을 구동 (DRM 통과용)
+    excel = win32.gencache.EnsureDispatch('Excel.Application')
+    excel.Visible = False # 엑셀 창은 숨김
     
-    # .xlsb, .xlsx 파일만 선택하도록 설정
-    file_path = filedialog.askopenfilename(
-        title="업로드할 엑셀 파일을 선택하세요",
-        filetypes=[("Excel files", "*.xlsb *.xlsx *.xls")]
-    )
-    return file_path
-
-# 3. 업로드 실행 함수
-def start_upload():
-    file_path = select_file()
-    
-    if not file_path:
-        print("파일 선택이 취소되었습니다.")
-        return
-
     try:
-        db = initialize_db()
+        wb = excel.Workbooks.Open(file_path)
+        ws = wb.ActiveSheet
         
-        # 컬렉션 이름을 파일명이나 날짜로 자동 생성 (예: Sales_Data)
-        collection_name = "Sales_Profit_Upload" 
+        # 전체 데이터 영역 읽기
+        raw_data = ws.UsedRange.Value
         
-        print(f"[{os.path.basename(file_path)}] 읽는 중...")
-        df = pd.read_excel(file_path, engine='pyxlsb')
-        df = df.where(pd.notnull(df), None) # 빈값 처리
-
-        batch = db.batch()
-        total_count = len(df)
+        # Pandas 데이터프레임으로 변환
+        # 첫 번째 줄은 컬럼명(Header), 나머지는 데이터
+        df = pd.DataFrame(raw_data[1:], columns=raw_data[0])
         
-        for index, row in df.iterrows():
-            doc_data = row.to_dict()
-            doc_ref = db.collection(collection_name).document()
-            batch.set(doc_ref, doc_data)
-            
-            if (index + 1) % 500 == 0:
-                batch.commit()
-                batch = db.batch()
-                print(f"{index + 1} / {total_count}개 완료...")
-
-        batch.commit()
-        messagebox.showinfo("성공", f"{total_count}건의 데이터가 성공적으로 업로드되었습니다!")
-        
+        wb.Close(False)
+        print(f"✅ 데이터 로드 완료: 총 {len(df):,}행")
+        return df
     except Exception as e:
-        messagebox.showerror("오류", f"업로드 중 문제가 발생했습니다:\n{e}")
+        print(f"❌ 엑셀 읽기 오류: {e}")
+        return None
+    finally:
+        excel.Quit()
+
+def upload_to_firestore(df, collection_name):
+    db = initialize_firebase()
+    collection_ref = db.collection(collection_name)
+    
+    # NaN(빈값) 처리: Firestore는 NaN을 인식 못하므로 None으로 변경
+    df = df.where(pd.notnull(df), None)
+    
+    batch = db.batch()
+    total_rows = len(df)
+    start_time = time.time()
+
+    print(f"🚀 {total_rows:,}건의 데이터 업로드를 시작합니다...")
+
+    for index, row in df.iterrows():
+        # 각 행을 딕셔너리로 변환하여 문서 생성
+        doc_ref = collection_ref.document()
+        batch.set(doc_ref, row.to_dict())
+        
+        # 500개마다 커밋 (Firestore 제한사항)
+        if (index + 1) % 500 == 0:
+            batch.commit()
+            batch = db.batch()
+            elapsed = time.time() - start_time
+            print(f"📦 {index + 1:,} / {total_rows:,} 완료 (소요시간: {elapsed:.1f}초)")
+
+    # 남은 데이터 최종 커밋
+    batch.commit()
+    print(f"\n✨ 업로드 완료! 총 {total_rows:,}건이 저장되었습니다.")
 
 if __name__ == "__main__":
-    start_upload()
+    # 1. 엑셀 데이터 가져오기
+    sales_df = read_secure_excel(EXCEL_FILE_PATH)
+    
+    # 2. 데이터가 정상적으로 로드되었다면 업로드 진행
+    if sales_df is not None:
+        upload_to_firestore(sales_df, COLLECTION_NAME)
