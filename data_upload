@@ -41,7 +41,7 @@ def upload_excel_to_firestore(file_path, collection_name):
 
 # 실행 부분
 if __name__ == "__main__":
-    FILE_NAME = "▣ 영업본부 26년 3월 손익 DATA (260403)_상품.xlsb"
+    FILE_NAME = "▣ 영업본부 26년 3월 손익 DATA (260403)_상품_t.xlsb"
     COLLECTION_NAME = "monthly_profits_202603" # Firebase에 생성될 테이블 이름
     
     upload_excel_to_firestore(FILE_NAME, COLLECTION_NAME)
